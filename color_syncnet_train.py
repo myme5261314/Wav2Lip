@@ -1,3 +1,4 @@
+import traceback
 from os.path import dirname, join, basename, isfile
 from tqdm import tqdm
 
@@ -37,6 +38,8 @@ syncnet_mel_step_size = 16
 class Dataset(object):
     def __init__(self, split):
         self.all_videos = get_image_list(args.data_root, split)
+        # Define cache variable dict to load melspectrogram data of each audio.wav file regarding the sampling_rate
+        self.mel_cache_map = {}
 
     def get_frame_id(self, frame):
         return int(basename(frame).split('.')[0])
@@ -109,10 +112,21 @@ class Dataset(object):
 
             try:
                 wavpath = join(vidname, "audio.wav")
-                wav = audio.load_wav(wavpath, hparams.sample_rate)
+                # Load from cache firstly, file secondly, recompute thirdly.
+                cache_mel_path = "%s.mel_%d.npy" % (wavpath, hparams.sample_rate)
+                orig_mel = self.mel_cache_map.get(cache_mel_path, None)
+                if orig_mel is None:
+                    if os.path.exists(cache_mel_path):
+                        orig_mel = np.load(cache_mel_path)
+                        self.mel_cache_map[cache_mel_path] = orig_mel
+                    else:
+                        wav = audio.load_wav(wavpath, hparams.sample_rate)
+                        orig_mel = audio.melspectrogram(wav).T
 
-                orig_mel = audio.melspectrogram(wav).T
+                        np.save(cache_mel_path, orig_mel)
+                        self.mel_cache_map[cache_mel_path] = orig_mel
             except Exception as e:
+                traceback.print_exc()
                 continue
 
             mel = self.crop_audio_window(orig_mel.copy(), img_name)
