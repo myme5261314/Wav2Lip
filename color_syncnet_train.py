@@ -17,6 +17,8 @@ from glob import glob
 import os, random, cv2, argparse
 from hparams import hparams, get_image_list
 
+import train_cache
+
 parser = argparse.ArgumentParser(description='Code to train the expert lip-sync discriminator')
 
 parser.add_argument("--data_root", help="Root folder of the preprocessed LRS2 dataset", required=True)
@@ -113,18 +115,7 @@ class Dataset(object):
             try:
                 wavpath = join(vidname, "audio.wav")
                 # Load from cache firstly, file secondly, recompute thirdly.
-                cache_mel_path = "%s.mel_%d.npy" % (wavpath, hparams.sample_rate)
-                orig_mel = self.mel_cache_map.get(cache_mel_path, None)
-                if orig_mel is None:
-                    if os.path.exists(cache_mel_path):
-                        orig_mel = np.load(cache_mel_path)
-                        self.mel_cache_map[cache_mel_path] = orig_mel
-                    else:
-                        wav = audio.load_wav(wavpath, hparams.sample_rate)
-                        orig_mel = audio.melspectrogram(wav).T
-
-                        np.save(cache_mel_path, orig_mel)
-                        self.mel_cache_map[cache_mel_path] = orig_mel
+                orig_mel = train_cache.get_mel_cache(wavpath, self.mel_cache_map)
             except Exception as e:
                 traceback.print_exc()
                 continue
