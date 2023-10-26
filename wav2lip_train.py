@@ -187,7 +187,7 @@ def cosine_loss(a, v, y):
     return loss
 
 device = torch.device("cuda" if use_cuda else "cpu")
-syncnet = SyncNet().to(device)
+syncnet = SyncNet().to(device, non_blocking=True)
 for p in syncnet.parameters():
     p.requires_grad = False
 
@@ -197,7 +197,7 @@ def get_sync_loss(mel, g):
     g = torch.cat([g[:, :, i] for i in range(syncnet_T)], dim=1)
     # B, 3 * T, H//2, W
     a, v = syncnet(mel, g)
-    y = torch.ones(g.size(0), 1).float().to(device)
+    y = torch.ones(g.size(0), 1).float().to(device, non_blocking=True)
     return cosine_loss(a, v, y)
 
 def train(device, model, train_data_loader, test_data_loader, optimizer,
@@ -215,10 +215,10 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
             optimizer.zero_grad()
 
             # Move data to CUDA device
-            x = x.to(device)
-            mel = mel.to(device)
-            indiv_mels = indiv_mels.to(device)
-            gt = gt.to(device)
+            x = x.to(device, non_blocking=True)
+            mel = mel.to(device, non_blocking=True)
+            indiv_mels = indiv_mels.to(device , non_blocking=True)
+            gt = gt.to(device, non_blocking=True)
 
             g = model(indiv_mels, x)
 
@@ -273,10 +273,10 @@ def eval_model(test_data_loader, global_step, device, model, checkpoint_dir):
             model.eval()
 
             # Move data to CUDA device
-            x = x.to(device)
-            gt = gt.to(device)
-            indiv_mels = indiv_mels.to(device)
-            mel = mel.to(device)
+            x = x.to(device, non_blocking=True)
+            gt = gt.to(device, non_blocking=True)
+            indiv_mels = indiv_mels.to(device, non_blocking=True)
+            mel = mel.to(device, non_blocking=True)
 
             g = model(indiv_mels, x)
 
@@ -347,7 +347,7 @@ if __name__ == "__main__":
 
     train_data_loader = data_utils.DataLoader(
         train_dataset, batch_size=hparams.batch_size, shuffle=True,
-        num_workers=hparams.num_workers)
+        num_workers=hparams.num_workers, pin_memory=True, prefetch_factor=20)
 
     test_data_loader = data_utils.DataLoader(
         test_dataset, batch_size=hparams.batch_size,
