@@ -1,6 +1,8 @@
+import traceback
 from os.path import dirname, join, basename, isfile
 from tqdm import tqdm
 
+import train_cache
 from models import SyncNet_color as SyncNet
 from models import Wav2Lip, Wav2Lip_disc_qual
 import audio
@@ -42,6 +44,7 @@ syncnet_mel_step_size = 16
 class Dataset(object):
     def __init__(self, split):
         self.all_videos = get_image_list(args.data_root, split)
+        self.mel_cache_map = {}
 
     def get_frame_id(self, frame):
         return int(basename(frame).split('.')[0])
@@ -138,10 +141,10 @@ class Dataset(object):
 
             try:
                 wavpath = join(vidname, "audio.wav")
-                wav = audio.load_wav(wavpath, hparams.sample_rate)
-
-                orig_mel = audio.melspectrogram(wav).T
+                # Load from cache firstly, file secondly, recompute thirdly.
+                orig_mel = train_cache.get_mel_cache(wavpath, self.mel_cache_map)
             except Exception as e:
+                traceback.print_exc()
                 continue
 
             mel = self.crop_audio_window(orig_mel.copy(), img_name)
@@ -178,7 +181,7 @@ def save_sample_images(x, g, gt, global_step, checkpoint_dir):
         for t in range(len(c)):
             cv2.imwrite('{}/{}_{}.jpg'.format(folder, batch_idx, t), c[t])
 
-logloss = nn.BCELoss()
+logloss = nn.BCEWithLogitsLoss()
 def cosine_loss(a, v, y):
     d = nn.functional.cosine_similarity(a, v)
     loss = logloss(d.unsqueeze(1), y)
@@ -403,11 +406,17 @@ if __name__ == "__main__":
 
     train_data_loader = data_utils.DataLoader(
         train_dataset, batch_size=hparams.batch_size, shuffle=True,
-        num_workers=hparams.num_workers)
+        num_workers=hparams.num_workers,
+        pin_memory=True,
+        prefetch_factor=20
+    )
 
     test_data_loader = data_utils.DataLoader(
         test_dataset, batch_size=hparams.batch_size,
-        num_workers=4)
+        num_workers=4,
+        pin_memory=True,
+        prefetch_factor=20
+    )
 
     device = torch.device("cuda" if use_cuda else "cpu")
 

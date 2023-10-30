@@ -149,7 +149,7 @@ class Wav2Lip_disc_qual(nn.Module):
             nn.Sequential(nonorm_Conv2d(512, 512, kernel_size=3, stride=1, padding=0),     # 1, 1
             nonorm_Conv2d(512, 512, kernel_size=1, stride=1, padding=0)),])
 
-        self.binary_pred = nn.Sequential(nn.Conv2d(512, 1, kernel_size=1, stride=1, padding=0), nn.Sigmoid())
+        self.binary_pred = nn.Sequential(nn.Conv2d(512, 1, kernel_size=1, stride=1, padding=0))
         self.label_noise = .0
 
     def get_lower_half(self, face_sequences):
@@ -168,7 +168,12 @@ class Wav2Lip_disc_qual(nn.Module):
         for f in self.face_encoder_blocks:
             false_feats = f(false_feats)
 
-        false_pred_loss = F.binary_cross_entropy(self.binary_pred(false_feats).view(len(false_feats), -1), 
+        # torch.nn.functional.binary_cross_entropy and torch.nn.BCELoss are unsafe to autocast.
+        # Many models use a sigmoid layer right before the binary cross entropy layer.
+        # In this case, combine the two layers using torch.nn.functional.binary_cross_entropy_with_logits
+        # or torch.nn.BCEWithLogitsLoss.  binary_cross_entropy_with_logits and BCEWithLogits are
+        # safe to autocast.
+        false_pred_loss = F.binary_cross_entropy_with_logits(self.binary_pred(false_feats).view(len(false_feats), -1),
                                         torch.ones((len(false_feats), 1)).cuda())
 
         return false_pred_loss
@@ -181,4 +186,4 @@ class Wav2Lip_disc_qual(nn.Module):
         for f in self.face_encoder_blocks:
             x = f(x)
 
-        return self.binary_pred(x).view(len(x), -1)
+        return F.sigmoid(self.binary_pred(x)).view(len(x), -1)

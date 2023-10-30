@@ -179,7 +179,7 @@ def save_sample_images(x, g, gt, global_step, checkpoint_dir):
         for t in range(len(c)):
             cv2.imwrite('{}/{}_{}.jpg'.format(folder, batch_idx, t), c[t])
 
-logloss = nn.BCELoss()
+logloss = nn.BCEWithLogitsLoss()
 def cosine_loss(a, v, y):
     d = nn.functional.cosine_similarity(a, v)
     loss = logloss(d.unsqueeze(1), y)
@@ -202,6 +202,8 @@ def get_sync_loss(mel, g):
 
 def train(device, model, train_data_loader, test_data_loader, optimizer,
           checkpoint_dir=None, checkpoint_interval=None, nepochs=None):
+    # Creates a GradScaler once at the beginning of training.
+    scaler = torch.cuda.amp.GradScaler()
 
     global global_step, global_epoch
     resumed_step = global_step
@@ -214,24 +216,33 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
             model.train()
             optimizer.zero_grad()
 
-            # Move data to CUDA device
-            x = x.to(device, non_blocking=True)
-            mel = mel.to(device, non_blocking=True)
-            indiv_mels = indiv_mels.to(device , non_blocking=True)
-            gt = gt.to(device, non_blocking=True)
+            with torch.autocast(device_type='cuda', dtype=torch.float16):
+                # Move data to CUDA device
+                x = x.to(device, non_blocking=True)
+                mel = mel.to(device, non_blocking=True)
+                indiv_mels = indiv_mels.to(device, non_blocking=True)
+                gt = gt.to(device, non_blocking=True)
 
-            g = model(indiv_mels, x)
+                g = model(indiv_mels, x)
 
-            if hparams.syncnet_wt > 0.:
-                sync_loss = get_sync_loss(mel, g)
-            else:
-                sync_loss = 0.
+                if hparams.syncnet_wt > 0.:
+                    sync_loss = get_sync_loss(mel, g)
+                else:
+                    sync_loss = 0.
 
-            l1loss = recon_loss(g, gt)
+                l1loss = recon_loss(g, gt)
 
-            loss = hparams.syncnet_wt * sync_loss + (1 - hparams.syncnet_wt) * l1loss
-            loss.backward()
-            optimizer.step()
+                loss = hparams.syncnet_wt * sync_loss + (1 - hparams.syncnet_wt) * l1loss
+            # Scales loss.  Calls backward() on scaled loss to create scaled gradients.
+            # Backward passes under autocast are not recommended.
+            # Backward ops run in the same dtype autocast chose for corresponding forward ops.
+            scaler.scale(loss).backward()
+            # scaler.step() first unscales the gradients of the optimizer's assigned params.
+            # If these gradients do not contain infs or NaNs, optimizer.step() is then called,
+            # otherwise, optimizer.step() is skipped.
+            scaler.step(optimizer)
+            # Updates the scale for next iteration.
+            scaler.update()
 
             if global_step % checkpoint_interval == 0:
                 save_sample_images(x, g, gt, global_step, checkpoint_dir)
@@ -351,7 +362,7 @@ if __name__ == "__main__":
 
     test_data_loader = data_utils.DataLoader(
         test_dataset, batch_size=hparams.batch_size,
-        num_workers=4)
+        num_workers=4, pin_memory=True, prefetch_factor=30)
 
     device = torch.device("cuda" if use_cuda else "cpu")
 
