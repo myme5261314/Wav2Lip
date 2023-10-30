@@ -186,4 +186,4 @@ class Wav2Lip_disc_qual(nn.Module):
         for f in self.face_encoder_blocks:
             x = f(x)
 
-        return F.sigmoid(self.binary_pred(x)).view(len(x), -1)
+        return self.binary_pred(x).view(len(x), -1)

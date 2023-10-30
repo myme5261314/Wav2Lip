@@ -189,7 +189,7 @@ def cosine_loss(a, v, y):
     return loss
 
 device = torch.device("cuda" if use_cuda else "cpu")
-syncnet = SyncNet().to(device)
+syncnet = SyncNet().to(device, non_blocking=True)
 for p in syncnet.parameters():
     p.requires_grad = False
 
@@ -199,11 +199,14 @@ def get_sync_loss(mel, g):
     g = torch.cat([g[:, :, i] for i in range(syncnet_T)], dim=1)
     # B, 3 * T, H//2, W
     a, v = syncnet(mel, g)
-    y = torch.ones(g.size(0), 1).float().to(device)
+    y = torch.ones(g.size(0), 1).float().to(device, non_blocking=True)
     return cosine_loss(a, v, y)
 
 def train(device, model, disc, train_data_loader, test_data_loader, optimizer, disc_optimizer,
           checkpoint_dir=None, checkpoint_interval=None, nepochs=None):
+    # Creates a GradScaler once at the beginning of training.
+    scaler = torch.cuda.amp.GradScaler()
+
     global global_step, global_epoch
     resumed_step = global_step
 
@@ -216,47 +219,58 @@ def train(device, model, disc, train_data_loader, test_data_loader, optimizer, d
             disc.train()
             model.train()
 
-            x = x.to(device)
-            mel = mel.to(device)
-            indiv_mels = indiv_mels.to(device)
-            gt = gt.to(device)
+            with torch.autocast(device_type='cuda', dtype=torch.float16):
+                x = x.to(device, non_blocking=True)
+                mel = mel.to(device, non_blocking=True)
+                indiv_mels = indiv_mels.to(device, non_blocking=True)
+                gt = gt.to(device, non_blocking=True)
 
-            ### Train generator now. Remove ALL grads. 
-            optimizer.zero_grad()
-            disc_optimizer.zero_grad()
+                ### Train generator now. Remove ALL grads.
+                optimizer.zero_grad()
+                disc_optimizer.zero_grad()
 
-            g = model(indiv_mels, x)
+                g = model(indiv_mels, x)
 
-            if hparams.syncnet_wt > 0.:
-                sync_loss = get_sync_loss(mel, g)
-            else:
-                sync_loss = 0.
+                if hparams.syncnet_wt > 0.:
+                    sync_loss = get_sync_loss(mel, g)
+                else:
+                    sync_loss = 0.
 
-            if hparams.disc_wt > 0.:
-                perceptual_loss = disc.perceptual_forward(g)
-            else:
-                perceptual_loss = 0.
+                if hparams.disc_wt > 0.:
+                    perceptual_loss = disc.perceptual_forward(g)
+                else:
+                    perceptual_loss = 0.
 
-            l1loss = recon_loss(g, gt)
+                l1loss = recon_loss(g, gt)
 
-            loss = hparams.syncnet_wt * sync_loss + hparams.disc_wt * perceptual_loss + \
-                                    (1. - hparams.syncnet_wt - hparams.disc_wt) * l1loss
+                loss = hparams.syncnet_wt * sync_loss + hparams.disc_wt * perceptual_loss + \
+                                        (1. - hparams.syncnet_wt - hparams.disc_wt) * l1loss
 
-            loss.backward()
-            optimizer.step()
+            # Scales loss.  Calls backward() on scaled loss to create scaled gradients.
+            # Backward passes under autocast are not recommended.
+            # Backward ops run in the same dtype autocast chose for corresponding forward ops.
+            scaler.scale(loss).backward()
+            # scaler.step() first unscales the gradients of the optimizer's assigned params.
+            # If these gradients do not contain infs or NaNs, optimizer.step() is then called,
+            # otherwise, optimizer.step() is skipped.
+            scaler.step(optimizer)
 
             ### Remove all gradients before Training disc
             disc_optimizer.zero_grad()
 
-            pred = disc(gt)
-            disc_real_loss = F.binary_cross_entropy(pred, torch.ones((len(pred), 1)).to(device))
-            disc_real_loss.backward()
+            with torch.autocast(device_type='cuda', dtype=torch.float16):
+                pred = disc(gt)
+                disc_real_loss = F.binary_cross_entropy_with_logits(pred, torch.ones((len(pred), 1)).to(device, non_blocking=True))
+            scaler.scale(disc_real_loss).backward()
 
-            pred = disc(g.detach())
-            disc_fake_loss = F.binary_cross_entropy(pred, torch.zeros((len(pred), 1)).to(device))
-            disc_fake_loss.backward()
+            with torch.autocast(device_type='cuda', dtype=torch.float16):
+                pred = disc(g.detach())
+                disc_fake_loss = F.binary_cross_entropy_with_logits(pred, torch.zeros((len(pred), 1)).to(device, non_blocking=True))
+            scaler.scale(disc_fake_loss).backward()
 
-            disc_optimizer.step()
+            scaler.step(disc_optimizer)
+            # Updates the scale for next iteration.
+            scaler.update()
 
             running_disc_real_loss += disc_real_loss.item()
             running_disc_fake_loss += disc_fake_loss.item()
@@ -309,17 +323,17 @@ def eval_model(test_data_loader, global_step, device, model, disc):
             model.eval()
             disc.eval()
 
-            x = x.to(device)
-            mel = mel.to(device)
-            indiv_mels = indiv_mels.to(device)
-            gt = gt.to(device)
+            x = x.to(device, non_blocking=True)
+            mel = mel.to(device, non_blocking=True)
+            indiv_mels = indiv_mels.to(device, non_blocking=True)
+            gt = gt.to(device, non_blocking=True)
 
             pred = disc(gt)
-            disc_real_loss = F.binary_cross_entropy(pred, torch.ones((len(pred), 1)).to(device))
+            disc_real_loss = F.binary_cross_entropy_with_logits(pred, torch.ones((len(pred), 1)).to(device, non_blocking=True))
 
             g = model(indiv_mels, x)
             pred = disc(g)
-            disc_fake_loss = F.binary_cross_entropy(pred, torch.zeros((len(pred), 1)).to(device))
+            disc_fake_loss = F.binary_cross_entropy_with_logits(pred, torch.zeros((len(pred), 1)).to(device, non_blocking=True))
 
             running_disc_real_loss.append(disc_real_loss.item())
             running_disc_fake_loss.append(disc_fake_loss.item())
@@ -421,8 +435,8 @@ if __name__ == "__main__":
     device = torch.device("cuda" if use_cuda else "cpu")
 
      # Model
-    model = Wav2Lip().to(device)
-    disc = Wav2Lip_disc_qual().to(device)
+    model = Wav2Lip().to(device, non_blocking=True)
+    disc = Wav2Lip_disc_qual().to(device, non_blocking=True)
 
     print('total trainable params {}'.format(sum(p.numel() for p in model.parameters() if p.requires_grad)))
     print('total DISC trainable params {}'.format(sum(p.numel() for p in disc.parameters() if p.requires_grad)))
