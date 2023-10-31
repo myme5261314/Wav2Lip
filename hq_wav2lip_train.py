@@ -29,6 +29,7 @@ parser.add_argument('--syncnet_checkpoint_path', help='Load the pre-trained Expe
 
 parser.add_argument('--checkpoint_path', help='Resume generator from this checkpoint', default=None, type=str)
 parser.add_argument('--disc_checkpoint_path', help='Resume quality disc from this checkpoint', default=None, type=str)
+parser.add_argument("--mixed_precision", help="Switch on auto mixed precision training", default=False, type=bool)
 
 args = parser.parse_args()
 
@@ -205,7 +206,7 @@ def get_sync_loss(mel, g):
 def train(device, model, disc, train_data_loader, test_data_loader, optimizer, disc_optimizer,
           checkpoint_dir=None, checkpoint_interval=None, nepochs=None):
     # Creates a GradScaler once at the beginning of training.
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.cuda.amp.GradScaler(enabled=args.mixed_precision)
 
     global global_step, global_epoch
     resumed_step = global_step
@@ -219,7 +220,7 @@ def train(device, model, disc, train_data_loader, test_data_loader, optimizer, d
             disc.train()
             model.train()
 
-            with torch.autocast(device_type='cuda', dtype=torch.float16):
+            with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=args.mixed_precision):
                 x = x.to(device, non_blocking=True)
                 mel = mel.to(device, non_blocking=True)
                 indiv_mels = indiv_mels.to(device, non_blocking=True)

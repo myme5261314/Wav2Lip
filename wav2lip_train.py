@@ -27,6 +27,7 @@ parser.add_argument('--checkpoint_dir', help='Save checkpoints to this directory
 parser.add_argument('--syncnet_checkpoint_path', help='Load the pre-trained Expert discriminator', required=True, type=str)
 
 parser.add_argument('--checkpoint_path', help='Resume from this checkpoint', default=None, type=str)
+parser.add_argument("--mixed_precision", help="Switch on auto mixed precision training", default=False, type=bool)
 
 args = parser.parse_args()
 
@@ -203,7 +204,7 @@ def get_sync_loss(mel, g):
 def train(device, model, train_data_loader, test_data_loader, optimizer,
           checkpoint_dir=None, checkpoint_interval=None, nepochs=None):
     # Creates a GradScaler once at the beginning of training.
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.cuda.amp.GradScaler(enabled=args.mixed_precision)
 
     global global_step, global_epoch
     resumed_step = global_step
@@ -216,7 +217,7 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
             model.train()
             optimizer.zero_grad()
 
-            with torch.autocast(device_type='cuda', dtype=torch.float16):
+            with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=args.mixed_precision):
                 # Move data to CUDA device
                 x = x.to(device, non_blocking=True)
                 mel = mel.to(device, non_blocking=True)
