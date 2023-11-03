@@ -30,6 +30,7 @@ parser.add_argument('--syncnet_checkpoint_path', help='Load the pre-trained Expe
 parser.add_argument('--checkpoint_path', help='Resume generator from this checkpoint', default=None, type=str)
 parser.add_argument('--disc_checkpoint_path', help='Resume quality disc from this checkpoint', default=None, type=str)
 parser.add_argument("--mixed_precision", help="Switch on auto mixed precision training", default=False, type=bool)
+parser.add_argument('--multi_gpu', help='Use all available gpu', default=False, type=bool)
 
 args = parser.parse_args()
 
@@ -436,8 +437,8 @@ if __name__ == "__main__":
     device = torch.device("cuda" if use_cuda else "cpu")
 
      # Model
-    model = Wav2Lip().to(device, non_blocking=True)
-    disc = Wav2Lip_disc_qual().to(device, non_blocking=True)
+    model = (nn.parallel.DataParallel(Wav2Lip()) if args.multi_gpu else Wav2Lip()).to(device, non_blocking=True)
+    disc = (nn.parallel.DataParallel(Wav2Lip_disc_qual()) if args.multi_gpu else Wav2Lip_disc_qual()).to(device, non_blocking=True)
 
     print('total trainable params {}'.format(sum(p.numel() for p in model.parameters() if p.requires_grad)))
     print('total DISC trainable params {}'.format(sum(p.numel() for p in disc.parameters() if p.requires_grad)))

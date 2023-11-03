@@ -25,6 +25,7 @@ parser.add_argument("--data_root", help="Root folder of the preprocessed LRS2 da
 
 parser.add_argument('--checkpoint_dir', help='Save checkpoints to this directory', required=True, type=str)
 parser.add_argument('--checkpoint_path', help='Resumed from this checkpoint', default=None, type=str)
+parser.add_argument('--multi_gpu', help='Use all available gpu', default=False, type=bool)
 
 args = parser.parse_args()
 
@@ -269,7 +270,7 @@ if __name__ == "__main__":
     device = torch.device("cuda" if use_cuda else "cpu")
 
     # Model
-    model = SyncNet().to(device)
+    model = (nn.parallel.DataParallel(SyncNet()) if args.multi_gpu else SyncNet()).to(device)
     print('total trainable params {}'.format(sum(p.numel() for p in model.parameters() if p.requires_grad)))
 
     optimizer = optim.Adam([p for p in model.parameters() if p.requires_grad],
