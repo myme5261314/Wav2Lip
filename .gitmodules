@@ -1,0 +1,3 @@
+[submodule "evaluation/scores_LSE/syncnet_python"]
+	path = evaluation/scores_LSE/syncnet_python
+	url = https://github.com/joonson/syncnet_python.git

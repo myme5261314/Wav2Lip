@@ -1,10 +1,12 @@
-from os import listdir, path
+import argparse
+import os
+import subprocess
+import sys
+
+import cv2
 import numpy as np
-import scipy, cv2, os, sys, argparse
-import dlib, json, subprocess
-from tqdm import tqdm
-from glob import glob
 import torch
+from tqdm import tqdm
 
 sys.path.append('../')
 import audio
