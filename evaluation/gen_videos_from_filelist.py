@@ -2,6 +2,9 @@ import argparse
 import os
 import subprocess
 import sys
+import traceback
+from concurrent.futures import as_completed, ProcessPoolExecutor
+import multiprocessing as mp
 
 import cv2
 import numpy as np
@@ -27,7 +30,8 @@ parser.add_argument('--pads', nargs='+', type=int, default=[0, 0, 0, 0],
 					help='Padding (top, bottom, left, right)')
 parser.add_argument('--face_det_batch_size', type=int, 
 					help='Single GPU batch size for face detection', default=64)
-parser.add_argument('--wav2lip_batch_size', type=int, help='Batch size for Wav2Lip', default=128)
+parser.add_argument('--wav2lip_batch_size', type=int, help='Batch size for Wav2Lip', default=512)
+parser.add_argument('--nprocess', help="Number of processes simultaneously running to generate videos.", type=int, default=6)
 
 # parser.add_argument('--resize_factor', default=1, type=int)
 
@@ -151,90 +155,110 @@ def load_model(path):
 
 model = load_model(args.checkpoint_path)
 
+def generate_video_file(line, args, idx):
+	audio_src, video = line.strip().split()
+
+	data_root = args.data_root
+	audio_src = os.path.join(data_root, audio_src) + '.mp4'
+	video = os.path.join(data_root, video) + '.mp4'
+
+	temp_audio = '../temp/temp{}.wav'.format(idx % args.ngpu)
+	command = 'ffmpeg -loglevel panic -y -i {} -strict -2 {}'.format(audio_src, temp_audio)
+	subprocess.call(command, shell=True)
+
+	wav = audio.load_wav(temp_audio, 16000)
+	mel = audio.melspectrogram(wav)
+	if np.isnan(mel.reshape(-1)).sum() > 0:
+		return
+
+	mel_chunks = []
+	i = 0
+	while 1:
+		start_idx = int(i * mel_idx_multiplier)
+		if start_idx + mel_step_size > len(mel[0]):
+			break
+		mel_chunks.append(mel[:, start_idx: start_idx + mel_step_size])
+		i += 1
+
+	video_stream = cv2.VideoCapture(video)
+
+	full_frames = []
+	while 1:
+		still_reading, frame = video_stream.read()
+		if not still_reading or len(full_frames) > len(mel_chunks):
+			video_stream.release()
+			break
+		full_frames.append(frame)
+
+	if len(full_frames) < len(mel_chunks):
+		return
+
+	full_frames = full_frames[:len(mel_chunks)]
+
+	try:
+		face_det_results = face_detect(full_frames.copy())
+	except ValueError as e:
+		return
+
+	batch_size = args.wav2lip_batch_size
+	gen = datagen(full_frames.copy(), face_det_results, mel_chunks)
+
+	for i, (img_batch, mel_batch, frames, coords) in enumerate(gen):
+		if i == 0:
+			frame_h, frame_w = full_frames[0].shape[:-1]
+			temp_video = '../temp/result{}.avi'.format(idx % args.ngpu)
+			out = cv2.VideoWriter(temp_video,
+								  cv2.VideoWriter_fourcc(*'DIVX'), fps, (frame_w, frame_h))
+
+		img_batch = torch.FloatTensor(np.transpose(img_batch, (0, 3, 1, 2))).to(device)
+		mel_batch = torch.FloatTensor(np.transpose(mel_batch, (0, 3, 1, 2))).to(device)
+
+		with torch.no_grad():
+			pred = model(mel_batch, img_batch)
+
+		pred = pred.cpu().numpy().transpose(0, 2, 3, 1) * 255.
+
+		for pl, f, c in zip(pred, frames, coords):
+			y1, y2, x1, x2 = c
+			pl = cv2.resize(pl.astype(np.uint8), (x2 - x1, y2 - y1))
+			f[y1:y2, x1:x2] = pl
+			out.write(f)
+
+	out.release()
+
+	vid = os.path.join(args.results_dir, '{}.mp4'.format(idx))
+
+	command = 'ffmpeg -loglevel panic -y -i {} -i {} -strict -2 -q:v 1 {}'.format(temp_audio,
+																				  temp_video, vid)
+	subprocess.call(command, shell=True)
+
+def mp_handler(job):
+	line, args, idx = job
+	try:
+		generate_video_file(line, args, idx)
+		print("Finish {}".format(line))
+	except KeyboardInterrupt:
+		exit(0)
+	except:
+		traceback.print_exc()
+
 def main():
 	assert args.data_root is not None
-	data_root = args.data_root
 
 	if not os.path.isdir(args.results_dir): os.makedirs(args.results_dir)
 
 	with open(args.filelist, 'r') as filelist:
 		lines = filelist.readlines()
 
-	for idx, line in enumerate(tqdm(lines)):
-		audio_src, video = line.strip().split()
+	jobs = [(line, args, i) for i, line in enumerate(lines)]
+	# This line can make multiprocessing Pytorch not stuck running.
+	# Refer to: https://blog.csdn.net/kelxLZ/article/details/114591236
+	mp.set_start_method("spawn")
+	p = ProcessPoolExecutor(args.ngpu)
+	futures = [p.submit(mp_handler, j) for j in jobs]
+	_ = [r.result() for r in tqdm(as_completed(futures), total=len(futures))]
+	# for idx, line in enumerate(tqdm(lines)):
 
-		audio_src = os.path.join(data_root, audio_src) + '.mp4'
-		video = os.path.join(data_root, video) + '.mp4'
-
-		command = 'ffmpeg -loglevel panic -y -i {} -strict -2 {}'.format(audio_src, '../temp/temp.wav')
-		subprocess.call(command, shell=True)
-		temp_audio = '../temp/temp.wav'
-
-		wav = audio.load_wav(temp_audio, 16000)
-		mel = audio.melspectrogram(wav)
-		if np.isnan(mel.reshape(-1)).sum() > 0:
-			continue
-
-		mel_chunks = []
-		i = 0
-		while 1:
-			start_idx = int(i * mel_idx_multiplier)
-			if start_idx + mel_step_size > len(mel[0]):
-				break
-			mel_chunks.append(mel[:, start_idx : start_idx + mel_step_size])
-			i += 1
-
-		video_stream = cv2.VideoCapture(video)
-			
-		full_frames = []
-		while 1:
-			still_reading, frame = video_stream.read()
-			if not still_reading or len(full_frames) > len(mel_chunks):
-				video_stream.release()
-				break
-			full_frames.append(frame)
-
-		if len(full_frames) < len(mel_chunks):
-			continue
-
-		full_frames = full_frames[:len(mel_chunks)]
-
-		try:
-			face_det_results = face_detect(full_frames.copy())
-		except ValueError as e:
-			continue
-
-		batch_size = args.wav2lip_batch_size
-		gen = datagen(full_frames.copy(), face_det_results, mel_chunks)
-
-		for i, (img_batch, mel_batch, frames, coords) in enumerate(gen):
-			if i == 0:
-				frame_h, frame_w = full_frames[0].shape[:-1]
-				out = cv2.VideoWriter('../temp/result.avi', 
-								cv2.VideoWriter_fourcc(*'DIVX'), fps, (frame_w, frame_h))
-
-			img_batch = torch.FloatTensor(np.transpose(img_batch, (0, 3, 1, 2))).to(device)
-			mel_batch = torch.FloatTensor(np.transpose(mel_batch, (0, 3, 1, 2))).to(device)
-
-			with torch.no_grad():
-				pred = model(mel_batch, img_batch)
-					
-
-			pred = pred.cpu().numpy().transpose(0, 2, 3, 1) * 255.
-			
-			for pl, f, c in zip(pred, frames, coords):
-				y1, y2, x1, x2 = c
-				pl = cv2.resize(pl.astype(np.uint8), (x2 - x1, y2 - y1))
-				f[y1:y2, x1:x2] = pl
-				out.write(f)
-
-		out.release()
-
-		vid = os.path.join(args.results_dir, '{}.mp4'.format(idx))
-
-		command = 'ffmpeg -loglevel panic -y -i {} -i {} -strict -2 -q:v 1 {}'.format(temp_audio, 
-								'../temp/result.avi', vid)
-		subprocess.call(command, shell=True)
 
 if __name__ == '__main__':
 	main()
