@@ -31,7 +31,7 @@ parser.add_argument('--pads', nargs='+', type=int, default=[0, 0, 0, 0],
 parser.add_argument('--face_det_batch_size', type=int, 
 					help='Single GPU batch size for face detection', default=64)
 parser.add_argument('--wav2lip_batch_size', type=int, help='Batch size for Wav2Lip', default=512)
-parser.add_argument('--nprocess', help="Number of processes simultaneously running to generate videos.", type=int, default=6)
+parser.add_argument('--nprocess', help="Number of processes simultaneously running to generate videos.", type=int, default=4)
 
 # parser.add_argument('--resize_factor', default=1, type=int)
 
@@ -162,7 +162,7 @@ def generate_video_file(line, args, idx):
 	audio_src = os.path.join(data_root, audio_src) + '.mp4'
 	video = os.path.join(data_root, video) + '.mp4'
 
-	temp_audio = '../temp/temp{}.wav'.format(idx % args.ngpu)
+	temp_audio = '../temp/temp{}.wav'.format(idx % args.nprocess)
 	command = 'ffmpeg -loglevel panic -y -i {} -strict -2 {}'.format(audio_src, temp_audio)
 	subprocess.call(command, shell=True)
 
@@ -206,7 +206,7 @@ def generate_video_file(line, args, idx):
 	for i, (img_batch, mel_batch, frames, coords) in enumerate(gen):
 		if i == 0:
 			frame_h, frame_w = full_frames[0].shape[:-1]
-			temp_video = '../temp/result{}.avi'.format(idx % args.ngpu)
+			temp_video = '../temp/result{}.avi'.format(idx % args.nprocess)
 			out = cv2.VideoWriter(temp_video,
 								  cv2.VideoWriter_fourcc(*'DIVX'), fps, (frame_w, frame_h))
 
@@ -236,7 +236,6 @@ def mp_handler(job):
 	line, args, idx = job
 	try:
 		generate_video_file(line, args, idx)
-		print("Finish {}".format(line))
 	except KeyboardInterrupt:
 		exit(0)
 	except:
@@ -253,8 +252,9 @@ def main():
 	jobs = [(line, args, i) for i, line in enumerate(lines)]
 	# This line can make multiprocessing Pytorch not stuck running.
 	# Refer to: https://blog.csdn.net/kelxLZ/article/details/114591236
+	# But it might take 5 minutes to initialize the ProcessPoolExecutor setup work before job executing.
 	mp.set_start_method("spawn")
-	p = ProcessPoolExecutor(args.ngpu)
+	p = ProcessPoolExecutor(args.nprocess)
 	futures = [p.submit(mp_handler, j) for j in jobs]
 	_ = [r.result() for r in tqdm(as_completed(futures), total=len(futures))]
 	# for idx, line in enumerate(tqdm(lines)):
